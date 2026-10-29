@@ -151,6 +151,13 @@ class InstallOwnPath(unittest.TestCase):
         self.assertEqual(Path(self.cfg["exe"]).parent, self.root / "engine")
         self.assertIn(("config", "strata-qwen36-ud-q4_k_xl.json"), self.calls)
 
+    def test_selected_kv_format_reaches_the_qwen36_engine_and_parallel_estimate(self):
+        rc, out = self.install(model="UD-Q4_K_XL", vision="no", context=32768, parallel=2, kv="q4_0")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.cfg["args"][self.cfg["args"].index("--kv") + 1], "q4_0")
+        self.assertAlmostEqual(setup.own_path_parallel_slot_gb(setup.OWN_PATH_FAMILIES["qwen36"], 32768, "q4_0"),
+                               32768 * 6336 / 1e9 + 0.07)
+
     def test_gguf_dir_takes_the_persons_own_files_that_have_no_finish_mark(self):
         folder = self.root / "own"
         folder.mkdir()

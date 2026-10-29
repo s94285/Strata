@@ -66,11 +66,12 @@ export const BATCH_MTP_DRAFTER_GB = 0.25;
 export const BATCH_MTP_MARGIN_GB = 2;
 
 const argValue = (args, flag) => { const at = args.indexOf(flag); return at >= 0 ? args[at + 1] : undefined; };
+const Q36_KV_BYTES = { fp32: 45056, fp16: 22528, int8: 11616, q4_0: 6336, k8v4: 8976 };
 
 /** Graphics memory (GB) one slot's session takes at `context` tokens. Flash-Next: 12 attention layers; Qwen3.6: 45 KB per token. */
 export function slotGb({ context, kv = 'int8', family = 'flash' }) {
   const ctx = Number(context) > 0 ? Number(context) : 32768;
-  if (family === 'q36') return (ctx * 45_000) / 1e9 + 0.07;
+  if (family === 'q36') return (ctx * (Q36_KV_BYTES[String(kv).toLowerCase()] ?? Q36_KV_BYTES.fp32)) / 1e9 + 0.07;
   return (ctx * 12 * (kv === 'q4_0' ? 1150 : 2100)) / 1e9 + 0.17; // measured on the 0.1.45 engine: 0.92 GiB per slot at 32K
 }
 
@@ -78,8 +79,8 @@ export function slotGb({ context, kv = 'int8', family = 'flash' }) {
 export function engineFacts(config = {}) {
   const args = Array.isArray(config.args) ? config.args.map(String) : [];
   const context = Number(argValue(args, '--max-context') ?? argValue(args, '--context') ?? config.max_context ?? config.context) || null;
-  const kv = /q4/i.test(argValue(args, '--kv') ?? argValue(args, '--kv-type') ?? '') ? 'q4_0' : 'int8';
   const family = /qwen3\.6|qwen36|35b-a3b/i.test(`${config.model_name ?? ''} ${args.join(' ')}`) ? 'q36' : 'flash';
+  const kv = String(argValue(args, '--kv') ?? argValue(args, '--kv-type') ?? (family === 'q36' ? 'fp32' : 'int8')).toLowerCase();
   const gpus = Array.isArray(config.gpu) ? config.gpu : config.gpu === undefined || config.gpu === null ? [0] : [config.gpu];
   return {
     args, context, kv, family, gpus,

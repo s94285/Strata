@@ -20,8 +20,29 @@ strata launch --family qwen36 --model ud-q4_k_xl --vision on --parallel 2
 | Option | Effect |
 | --- | --- |
 | `--vision on\|off\|gpu\|cpu` | Terminal: pictures and which reader. Source setup uses `--vision yes\|no\|gpu\|cpu` and `--vision-tokens N`. |
+| `--kv int8\|q4_0\|k8v4\|fp16` | Context memory format. The app offers INT8, Q4 and K8/V4 in Expert settings. |
 | `--parallel N` | How many requests are answered at once, 1 to 8. Source setup has the same option. |
 | `--prefill 512` | Engine flag in the config's `args`, not a `strata launch` option: the prompt chunk size ([Prompt chunk](#prompt-chunk)). |
+
+## Context memory
+
+The Qwen3.6 engine supports the same three compressed formats as the app's Qwen3.8 engine. INT8 keeps 8-bit values,
+Q4 uses 4-bit values after a rotation, and K8/V4 keeps keys in INT8 and values in Q4. `fp16` is also available from
+the Terminal. Without `--kv`, Qwen3.6 keeps its original FP32 cache.
+
+The cache size for one request slot, per context token, follows from the engine's 10 attention layers and the MTP
+attention layer:
+
+| Format | Cache bytes per token |
+| --- | ---: |
+| FP32 (default) | 45,056 |
+| FP16 | 22,528 |
+| INT8 | 11,616 |
+| Q4 | 6,336 |
+| K8/V4 | 8,976 |
+
+These are storage sizes, not speed or quality measurements. The app uses the selected format when it estimates memory
+and starts the engine.
 
 ## Pictures
 
@@ -71,10 +92,11 @@ slower read. The default is one decode window per chunk.
 no drafts unless `--batch-mtp` is in the config's `args` (opt-in). Each slot's window then also carries the proposal its
 MTP block made, one per slot, up to the rows to spare in the 8-row window.
 
-**What a slot costs.** Each slot keeps its own cache in VRAM: 1.5 GB at a context of 32K (fp32 keys and values of the 10
-attention layers and the MTP block, 45 KB per token) and 0.07 GB of recurrent state. Setup writes the context for one
-conversation, so N slots take N times that from the room the experts would have. On a card that does not hold every
-expert (12 and 16 GB, the hybrid mode) the expert slots lose that room, and a batch reads more distinct experts from RAM.
+**What a slot costs.** Each slot keeps its own cache in VRAM. At 32K, the FP32 cache takes 1.48 GB; INT8 takes 0.38 GB,
+Q4 takes 0.21 GB, and K8/V4 takes 0.29 GB. Each slot also keeps 0.07 GB of recurrent state. Setup writes the context
+for one conversation, so N slots take N times that from the room the experts would have. On a card that does not hold
+every expert (12 and 16 GB, the hybrid mode) the expert slots lose that room, and a batch reads more distinct experts
+from RAM.
 
 Setup offers `--parallel` where the sessions do not eat the experts' room, says the price in the same breath and asks
 "How many requests at once?" Enter keeps one at a time, and any number you give is kept.

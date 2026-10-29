@@ -39,6 +39,14 @@ test('sizing: the slots may take at most a fifth of the expert cache the card wo
   assert.doesNotMatch(small.note + some.note, /--|batch|VRAM|GiB|tok|cache/i, 'no engine words');
 });
 
+test('Qwen3.6 session sizing follows the selected cache format', () => {
+  const slots = ['fp32', 'int8', 'q4_0', 'k8v4'].map(kv => slotGb({ context: 32768, family: 'q36', kv }));
+  assert.ok(slots[0] > slots[1]);
+  assert.ok(slots[1] > slots[3]);
+  assert.ok(slots[3] > slots[2]);
+  assert.ok(Math.abs(slots[1] - (32768 * 11616 / 1e9 + 0.07)) < 1e-9);
+});
+
 test('batch-mtp is automatic on big single cards only: 24 GB and up with room for the drafters, never on small cards or a layer split; Expert mode overrides either way', () => {
   assert.equal(BATCH_MTP_POLICY, 'auto');
   const mtp = (gb, extra = {}, cards = 1, values = {}, context = 32768) => chooseParallel({ config: cfg(context, extra), hardware: hw(gb, cards), values });

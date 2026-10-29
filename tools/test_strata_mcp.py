@@ -646,8 +646,16 @@ class Helpers(unittest.TestCase):
         self.assertEqual((plan["title"], plan["download_gb"], plan["family"]), ("Qwen3.6-35B-A3B UD-Q4_K_XL", 22.9, "qwen36"))
         self.assertEqual(args[:10], ["--yes", "--no-start", "--family", "qwen36", "--model", "UD-Q4_K_XL", "--context", "32768",
                                      "--vision", "yes"])
-        for flag in ("--kv", "--low-ram", "--experimental-speed-projection"):      # Flash-Next settings: setup would only warn
+        self.assertEqual(args[args.index("--kv") + 1], "int8")
+        for flag in ("--low-ram", "--experimental-speed-projection"):
             self.assertNotIn(flag, args)
+        for mode in ("int8", "q4_0", "k8v4"):
+            _plan, mode_args = M.Tools(s).install_plan("qwen36", "UD-Q4_K_XL", 32768, "no", mode,
+                                                        None, None, None, "auto", None, None)
+            self.assertEqual(mode_args[mode_args.index("--kv") + 1], mode)
+        _plan, default_args = M.Tools(s).install_plan("qwen36", "UD-Q4_K_XL", 32768, "no", None,
+                                                       None, None, None, "auto", None, None)
+        self.assertNotIn("--kv", default_args)
         plan, _a = M.Tools(s).install_plan("qwen36", None, 32768, "no", None, None, None, None, None, None, None)
         self.assertEqual(plan["model"], "UD-Q4_K_XL")
         with self.assertRaises(M.ToolError):

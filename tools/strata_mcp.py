@@ -1963,7 +1963,8 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "under 24 GB of VRAM, the GPU from 24 GB, any make), gpu / cpu = that "
                                        "reader, no = text only"},
              "kv": {"type": "string", "enum": ["int8", "q4_0", "k8v4"],
-                    "description": "KV cache precision above 8K context (default int8)"},
+                    "description": "KV cache precision: INT8, Q4 or K8/V4. Qwen3.6 accepts these modes and defaults to "
+                                   "FP32 if omitted; Flash-Next defaults to INT8."},
              "gpu": {"type": "integer", "minimum": 0, "maximum": 63,
                      "description": "one GPU, as nvidia-smi numbers them (default: the one with the most VRAM)"},
              "gpus": {"type": "string", "pattern": GPUS_PATTERN, "maxLength": 40,
@@ -2318,7 +2319,8 @@ class Tools:
         own = bool(s.own_families().get(family))
         for flag, v in (("--kv", kv), ("--gpu", gpu), ("--gpus", gpus), ("--low-ram", low_ram), ("--port", port),
                         ("--data-dir", str(target) if data_dir else None)):
-            if own and flag in ("--kv", "--low-ram"):      # Flash-Next settings: Qwen3.6's engine path does not use them (setup would warn)
+            if own and (flag == "--low-ram" or (flag == "--kv" and family != "qwen36")):
+                # Qwen3.6 supports --kv; its own engine does not use Flash-Next's low-RAM setting.
                 continue
             if v is not None:
                 args += [flag, str(v)]

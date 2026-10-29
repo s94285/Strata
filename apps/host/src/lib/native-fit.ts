@@ -34,15 +34,19 @@ export function memoryNeeded(v: FitInput): number {
  *  (strata_control/vram_fit.py KV_BYTES, KV_MEASURED_FACTOR; setup.py UD_FIT_KV_BYTES). */
 const KV_BYTES: Record<string, number> = { fp16: 2112, int8: 1056, q4_0: 576, k8v4: 816 };
 const KV_LAYERS = 13, KV_FACTOR = 1.054, BASE_CONTEXT = 32768;
-export function cacheGb(context: number, kv = 'int8'): number {
+const Q36_KV_BYTES: Record<string, number> = { fp32: 45056, fp16: 22528, int8: 11616, q4_0: 6336, k8v4: 8976 };
+export function cacheGb(context: number, kv = 'int8', family = 'flash'): number {
+  if (family === 'q36') return (70 * 2 ** 20 + context * (Q36_KV_BYTES[String(kv).toLowerCase()] ?? Q36_KV_BYTES.fp32)) / 2 ** 30;
   return (121 + context * KV_LAYERS * (KV_BYTES[String(kv).toLowerCase()] ?? KV_BYTES.int8) * KV_FACTOR / 2 ** 20) / 1024;   // 121 MiB fixed per session
 }
-export interface CacheChoice { context: number; kv?: string }
+export interface CacheChoice { context: number; kv?: string; family?: string }
 
 export function fitOn(v: FitInput, hw: FitHardware | null | undefined, mtp = true, cache?: CacheChoice | null): Fit {
   const memoryGb = memoryNeeded(v);
   // DENSE_GB already holds a 32K cache in the default format; the person's context and format replace it (#3832).
-  const denseGb = cache && cache.context > 0 ? Math.max(DENSE_GB - cacheGb(BASE_CONTEXT), 0) + cacheGb(cache.context, cache.kv) : DENSE_GB;
+  const denseGb = cache && cache.context > 0
+    ? Math.max(DENSE_GB - cacheGb(BASE_CONTEXT, 'int8', cache.family), 0) + cacheGb(cache.context, cache.kv, cache.family)
+    : DENSE_GB;
   const ram = Number(hw?.ram_gb), vram = Number(hw?.vram_gb) || 0;
   if (!Number.isFinite(ram) || ram <= 0) return { memoryGb, vramUseGb: 0, ramUseGb: 0, spillGb: 0, known: false };
   const experts = Math.max(0, memoryNeeded(v) - DENSE_EXTRA_GB);

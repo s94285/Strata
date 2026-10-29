@@ -95,3 +95,12 @@ test('the conversation context and cache format move the estimate (#3832)', () =
   const tight = fitOn(q4, pc, true, { context: 524288, kv: 'int8' });
   assert.ok(tight.spillGb > fitOn(q4, pc).spillGb, 'what no longer fits is read from the SSD and the card says so');
 });
+
+test('Qwen3.6 fit estimates use its 11 attention caches and selected cache format', () => {
+  const fp32 = cacheGb(32768, 'fp32', 'q36');
+  assert.ok(Math.abs(fp32 - 1.443) < 0.01);
+  assert.ok(cacheGb(32768, 'int8', 'q36') < fp32);
+  assert.ok(cacheGb(32768, 'q4_0', 'q36') < cacheGb(32768, 'k8v4', 'q36'));
+  assert.ok(fitOn(q4, { ram_gb: 64, vram_gb: 16 }, true, { context: 131072, kv: 'q4_0', family: 'q36' }).spillGb
+    < fitOn(q4, { ram_gb: 64, vram_gb: 16 }, true, { context: 131072, kv: 'fp32', family: 'q36' }).spillGb);
+});

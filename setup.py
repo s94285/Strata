@@ -7687,10 +7687,13 @@ def own_path_vision(a, fam: dict, gpu: dict, hip: bool) -> str:
     return asked
 
 
-def own_path_parallel_slot_gb(fam: dict, ctx: int) -> float:
-    """The VRAM one batch slot's session takes: its KV cache (fp32 K and V of the attention layers and the MTP block) and
-    the recurrent state of the GDN layers."""
-    return ctx * fam["kv_bytes_per_token"] / 1e9 + fam["state_gb"]
+OWN_PATH_KV_BYTES = {"fp32": 45056, "fp16": 22528, "int8": 11616, "q4_0": 6336, "k8v4": 8976}
+
+
+def own_path_parallel_slot_gb(fam: dict, ctx: int, kv: str | None = None) -> float:
+    """The VRAM one batch slot's session takes: its selected-format KV cache (FP32 if --kv is omitted) and the recurrent
+    state of the GDN layers."""
+    return ctx * OWN_PATH_KV_BYTES.get(kv, fam["kv_bytes_per_token"]) / 1e9 + fam["state_gb"]
 
 
 PARALLEL_SMALL_SHARE = 0.35     # a card that does not hold every expert: the slots' sessions may take this share of the room the
@@ -7699,26 +7702,26 @@ PARALLEL_SMALL_SHARE = 0.35     # a card that does not hold every expert: the sl
                                 # 16 GB, 32K, 2 slots (27%): -11% / -9%, 4 slots (54%): -27% and no gain together.
 
 
-def own_path_parallel_fits_all(fam: dict, model: str, vram_gb: float, ctx: int, n: int) -> bool:
+def own_path_parallel_fits_all(fam: dict, model: str, vram_gb: float, ctx: int, n: int, kv: str | None = None) -> bool:
     """True where every routed expert still sits in VRAM beside n slots' sessions (one more session than the slots: the
     solo path's own)."""
     size = fam["sha256"][fam["file"].format(q=model)][0] / 1e9
     base = size * 0.93 + 4.5       # the routed experts + the dense weights and buffers (the file's 7% beyond them)
-    return base + (n + 1) * own_path_parallel_slot_gb(fam, ctx) <= vram_gb
+    return base + (n + 1) * own_path_parallel_slot_gb(fam, ctx, kv) <= vram_gb
 
 
-def own_path_parallel_recommend(fam: dict, model: str, vram_gb: float, ctx: int) -> int:
+def own_path_parallel_recommend(fam: dict, model: str, vram_gb: float, ctx: int, kv: str | None = None) -> int:
     """How many requests at once to recommend: 0 = none (the card cannot hold even two slots).  Where every routed expert
     still fits in VRAM with the slots' sessions, up to 4 (a batch reads each expert once for all its rows).  On a card
     that does not hold every expert even for one session (the hybrid mode already) it is recommended too, as an offer with
     its price said: measured on
     an RTX 3060 12 GB, 4 requests together run ~1.5x as fast as one, a request alone ~5% slower, because the slots take
     VRAM from the expert cache; up to the count whose sessions leave PARALLEL_SMALL_ROOM_GB of the card."""
-    slot = own_path_parallel_slot_gb(fam, ctx)
-    best = max([n for n in (2, 3, 4) if own_path_parallel_fits_all(fam, model, vram_gb, ctx, n)], default=0)
+    slot = own_path_parallel_slot_gb(fam, ctx, kv)
+    best = max([n for n in (2, 3, 4) if own_path_parallel_fits_all(fam, model, vram_gb, ctx, n, kv)], default=0)
     if best:
         return best
-    if own_path_parallel_fits_all(fam, model, vram_gb, ctx, 0):
+    if own_path_parallel_fits_all(fam, model, vram_gb, ctx, 0, kv):
         return 0       # a card that holds every expert for one session only: more sessions would push experts to the CPU
                        # (measured on a 32 GB R9700 at 128K: 4 slots left 15 of 256 experts per layer, decode 81 tok/s
                        # against ~180): not offered there, a number asked for is kept
@@ -7726,18 +7729,18 @@ def own_path_parallel_recommend(fam: dict, model: str, vram_gb: float, ctx: int)
     return max([n for n in (2, 3, 4) if n * slot <= PARALLEL_SMALL_SHARE * room], default=0)
 
 
-def own_path_parallel_note(a_parallel, fam: dict, model: str, vram_gb: float, ctx: int) -> list:
+def own_path_parallel_note(a_parallel, fam: dict, model: str, vram_gb: float, ctx: int, kv: str | None = None) -> list:
     """What setup says about "parallel" for an own-path family: the recommendation, or how the asked count compares with
     it (kept as asked: recommend, never force)."""
-    rec = own_path_parallel_recommend(fam, model, vram_gb, ctx)
-    slot = own_path_parallel_slot_gb(fam, ctx)
+    rec = own_path_parallel_recommend(fam, model, vram_gb, ctx, kv)
+    slot = own_path_parallel_slot_gb(fam, ctx, kv)
     if a_parallel is None or a_parallel <= 1:
         if not rec:
             return ["Several requests at once (opt-in, --parallel N): left at one at a time, because this card cannot spare "
                     f"the room: each session takes ~{slot:.1f} GB of VRAM at this context, and where the card holds every "
                     "expert only for one session, more would move experts to the CPU and slow every request a lot (a "
                     "smaller context leaves room for more; docs/QWEN36.md)."]
-        if own_path_parallel_fits_all(fam, model, vram_gb, ctx, rec):
+        if own_path_parallel_fits_all(fam, model, vram_gb, ctx, rec, kv):
             return [f"Several requests at once (opt-in): --parallel {rec} decodes up to {rec} together instead of one after "
                     f"the other (each takes ~{slot:.1f} GB of VRAM at this context; docs/BATCHING.md)."]
         return [f"Several requests at once (opt-in): --parallel {rec} decodes up to {rec} together, so a second user or agent "
@@ -7765,6 +7768,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     script.  The engine places the experts itself (every one in VRAM when they fit, else the most-used ones there and
     the rest on the CPU), so there is no pack, profile or RAM budget to choose."""
     fam = OWN_PATH_FAMILIES[family]
+    kv = a.kv or "fp32"
     say()
     say(f"  {fam['title']} - {fam['by']}: {fam['about']}")
     ok(f"model: {fam['title']}")
@@ -7801,7 +7805,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         ctxs = [c for c in CONTEXTS if c <= 262144]   # the model's trained length; no rope scaling on this path yet
         say()
         say("  Context length = how much text the model can see at once. Its cache takes "
-            f"{fam['kv_bytes_per_token'] * 32768 / 2**30:.1f} GB of VRAM per 32K tokens, room the experts would use:")
+            f"{OWN_PATH_KV_BYTES.get(kv, fam['kv_bytes_per_token']) * 32768 / 2**30:.1f} GB of VRAM per 32K tokens, room the experts would use:")
         for i, c in enumerate(ctxs, 1):
             say(f"  {i}) {c // 1024}K tokens" + ("   (recommended for your GPU)" if c == rec_ctx else ""))
         ctx = ctxs[int(ask("Context?", [str(i) for i in range(1, len(ctxs) + 1)], str(ctxs.index(rec_ctx) + 1),
@@ -7817,16 +7821,15 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     par_said = False
     if par is None and not a.yes:                      # offered, with its price; Enter keeps one at a time (never forced)
         say()
-        for line in own_path_parallel_note(None, fam, model, vram_gb, ctx):
+        for line in own_path_parallel_note(None, fam, model, vram_gb, ctx, kv):
             say("  " + line)
         par_said = True
-        if own_path_parallel_recommend(fam, model, vram_gb, ctx):
+        if own_path_parallel_recommend(fam, model, vram_gb, ctx, kv):
             n = int(ask("How many requests at once (1 = one at a time)?", [str(i) for i in range(1, PARALLEL_MAX + 1)],
                         "1", a.yes))
             par = n if n > 1 else None
-    if a.rope_scaling or a.rope_scale or a.kv or a.resident_budget_gib is not None or a.low_ram not in (None, "auto"):
-        warn(f"--rope-scaling / --kv / --resident-budget-gib / --low-ram are Flash-Next settings: {fam['title']} "
-             "does not use them")
+    if a.rope_scaling or a.rope_scale or a.resident_budget_gib is not None or a.low_ram not in (None, "auto"):
+        warn(f"--rope-scaling / --resident-budget-gib / --low-ram are Flash-Next settings: {fam['title']} does not use them")
     folder = Path(a.gguf_dir) if a.gguf_dir else Path(a.models_dir) / tag
     gguf = folder / fam["file"].format(q=model)
     size = fam["sha256"][gguf.name][0]
@@ -7886,6 +7889,8 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
 
     step(7, "writing the start script")
     args = ["--native", str(gguf), "--max-context", str(ctx), "--prefill", "auto", "--mtp", str(fam["mtp"])]
+    if a.kv:
+        args += ["--kv", kv]
     if a.vram_reserve_mib is not None:             # VRAM left free for other programs: the experts take that much less
         vram = gpu.get("vram_gb", 0.0)
         if vram > 0:
@@ -7928,7 +7933,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     if par is not None:
         if par >= 2:
             cfg["parallel"] = par
-            for i, line in enumerate(own_path_parallel_note(par, fam, model, vram_gb, ctx)):
+            for i, line in enumerate(own_path_parallel_note(par, fam, model, vram_gb, ctx, kv)):
                 (ok if i == 0 else warn)(line)
         else:
             cfg["parallel"] = 1
@@ -7944,7 +7949,7 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
     if vision != "none":
         say("  Images:           send them in the chat page, in chat.py (/image <path>) or over the API")
     if par is None and not par_said:                   # the opt-in, said once (nothing changes)
-        for line in own_path_parallel_note(None, fam, model, vram_gb, ctx):
+        for line in own_path_parallel_note(None, fam, model, vram_gb, ctx, kv):
             say("  " + line)
     if a.no_start:
         return 0
@@ -10170,4 +10175,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         say("\nstopped.")
         sys.exit(1)
-
